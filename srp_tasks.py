@@ -173,4 +173,4 @@ if __name__ == "__main__":
     print("\n--- After Complete(1) ---")
     for t in manager.list_tasks():
         print(t)
-    print("-------------------------")
+    print("Finished")
