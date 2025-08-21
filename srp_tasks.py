@@ -1,194 +1,176 @@
-# srp_tasks.py
+from __future__ import annotations
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Iterable
+from enum import Enum
 
 # --------------------------
 # Abstract Storage Interface
 # --------------------------
 class TaskStorage(ABC):
     @abstractmethod
-    def load_tasks(self):
-        pass
+    def load_tasks(self) -> List["Task"]:
+        """Load tasks from the underlying medium."""
+        raise NotImplementedError
 
     @abstractmethod
-    def save_tasks(self, tasks):
-        pass
+    def save_tasks(self, tasks: Iterable["Task"]) -> None:
+        """Persist tasks to the underlying medium."""
+        raise NotImplementedError
 
 
 # --------------------------
-# File-based Task Storage
+# Priority Enum
+# --------------------------
+class Priority(Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+    @classmethod
+    def from_str(cls, value: Optional[str]) -> "Priority":
+        if not value:
+            return cls.MEDIUM
+        v = str(value).strip().lower()
+        if v in {"l", "low"}:
+            return cls.LOW
+        if v in {"m", "med", "medium"}:
+            return cls.MEDIUM
+        if v in {"h", "hi", "high"}:
+            return cls.HIGH
+        return cls.MEDIUM
+
+
+# --------------------------
+# File-based Task Storage (CSV-like)
 # --------------------------
 class FileTaskStorage(TaskStorage):
-    def __init__(self, filename="tasks.txt"):
-        self.filename = filename
+    def __init__(self, filename: str = "tasks.txt") -> None:
+        self.filename = Path(filename)
 
-    def load_tasks(self):
-        loaded_tasks = []
-        try:
-            with open(self.filename, "r") as f:
-                for line in f:
-                    parts = line.strip().split(',')
-                    if len(parts) == 4:
-                        task_id = int(parts[0])
-                        description = parts[1]
-                        due_date = parts[2] if parts[2] != 'None' else None
-                        completed = parts[3] == 'True'
-                        loaded_tasks.append(Task(task_id, description, due_date, completed))
-        except FileNotFoundError:
+    def load_tasks(self) -> List["Task"]:
+        loaded: List[Task] = []
+        if not self.filename.exists():
             print(f"No existing task file '{self.filename}' found. Starting fresh.")
-        return loaded_tasks
+            return loaded
 
-    def save_tasks(self, tasks):
-        with open(self.filename, "w") as f:
-            for task in tasks:
-                f.write(f"{task.id},{task.description},{task.due_date},{task.completed}\n")
+        with self.filename.open("r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\n").split(",")
+                if len(parts) not in (4, 5):
+                    continue  # skip malformed lines quietly
+                try:
+                    task_id = int(parts[0])
+                    description = parts[1].replace("\\u002C", ",")
+                    due_date = parts[2] or None
+                    due_date = None if due_date == "None" else due_date
+                    completed = parts[3].strip().lower() == "true"
+                    priority = Priority.from_str(parts[4]) if len(parts) == 5 else Priority.MEDIUM
+                    loaded.append(Task(task_id, description, due_date, completed, priority))
+                except ValueError:
+                    continue
+        return loaded
+
+    def save_tasks(self, tasks: Iterable["Task"]) -> None:
+        with self.filename.open("w", encoding="utf-8") as f:
+            for t in tasks:
+                desc = (t.description or "").replace(",", "\\u002C")
+                f.write(f"{t.id},{desc},{t.due_date},{t.completed},{t.priority.value}\n")
         print(f"Tasks saved to {self.filename}")
 
 
 # --------------------------
-# Task Class
+# Domain Model: Task
 # --------------------------
+@dataclass
 class Task:
-    def __init__(self, task_id, description, due_date=None, completed=False):
-        self.id = task_id
-        self.description = description
-        self.due_date = due_date
-        self.completed = completed
+    id: int
+    description: str
+    due_date: Optional[str] = None
+    completed: bool = False
+    priority: Priority = Priority.MEDIUM  # low/medium/high
 
-    def mark_completed(self):
+    def mark_completed(self) -> None:
         self.completed = True
         print(f"Task {self.id} '{self.description}' marked as completed.")
 
-    def __str__(self):
+    def __str__(self) -> str:
         status = "/" if self.completed else " "
         due = f" (Due: {self.due_date})" if self.due_date else ""
-        return f"[{status}] {self.id}. {self.description}{due}"
+        return f"[{status}] {self.id}. {self.description}{due} [Priority: {self.priority.value}]"
 
 
 # --------------------------
-# TaskManager (uses SRP)
+# TaskManager (coordinates domain + storage)
 # --------------------------
 class TaskManager:
-    def __init__(self, storage: TaskStorage):
-        # รับ storage object (dependency injection)
+    def __init__(self, storage: TaskStorage) -> None:
         self.storage = storage
-        self.tasks = self.storage.load_tasks()
-        self.next_id = max([t.id for t in self.tasks] + [0]) + 1 if self.tasks else 1
+        self.tasks: List[Task] = self.storage.load_tasks()
+        self.next_id: int = (max((t.id for t in self.tasks), default=0) + 1)
         print(f"Loaded {len(self.tasks)} tasks. Next ID: {self.next_id}")
 
-    def add_task(self, description, due_date=None):
-        task = Task(self.next_id, description, due_date)
+    def add_task(
+        self,
+        description: str,
+        due_date: Optional[str] = None,
+        priority: Optional[object] = None,  # can be Priority or str
+    ) -> Task:
+        pr = priority if isinstance(priority, Priority) else Priority.from_str(priority)
+        task = Task(self.next_id, description, due_date, False, pr)
         self.tasks.append(task)
         self.next_id += 1
-        self.storage.save_tasks(self.tasks)  # Save after adding
-        print(f"Task '{description}' added.")
+        self.storage.save_tasks(self.tasks)
+        print(f"Task '{description}' added with priority {pr.value}.")
         return task
 
-    def list_tasks(self):
-        print("\n--- Current Tasks ---")
-        if not self.tasks:
-            print("No tasks available.")
-            return
-        for task in self.tasks:
-            print(task)
-        print("---------------------")
+    def list_tasks(self) -> List[Task]:
+        return list(self.tasks)
 
-    def get_task_by_id(self, task_id):
-        for task in self.tasks:
-            if task.id == task_id:
-                return task
-        return None
+    def get_task_by_id(self, task_id: int) -> Optional[Task]:
+        return next((t for t in self.tasks if t.id == task_id), None)
 
-    def mark_task_completed(self, task_id):
+    def mark_task_completed(self, task_id: int) -> bool:
         task = self.get_task_by_id(task_id)
-        if task:
-            task.mark_completed()
-            self.storage.save_tasks(self.tasks)  # Save after marking
-            return True
-        print(f"Task {task_id} not found.")
-        return False
+        if not task:
+            print(f"Task {task_id} not found.")
+            return False
+        task.mark_completed()
+        self.storage.save_tasks(self.tasks)
+        return True
+
+    def remove_task(self, task_id: int) -> bool:
+        before = len(self.tasks)
+        self.tasks = [t for t in self.tasks if t.id != task_id]
+        if len(self.tasks) == before:
+            print(f"Task {task_id} not found.")
+            return False
+        self.storage.save_tasks(self.tasks)
+        print(f"Task {task_id} removed.")
+        return True
 
 
 # --------------------------
-# Main Program Logic
+# Main Program Logic (demo CLI)
 # --------------------------
 if __name__ == "__main__":
-    file_storage = FileTaskStorage("my_tasks.txt")
-    manager = TaskManager(file_storage)  # ส่ง FileTaskStorage เข้าไปเป็นอากิวเมนต์
+    storage = FileTaskStorage("my_tasks.txt")
+    manager = TaskManager(storage)
 
-    manager.list_tasks()
-    manager.add_task("Review SOLID Principles", "2024-08-10")
-    manager.add_task("Prepare for Final Exam", "2024-08-15")
-    manager.list_tasks()
+    if not manager.list_tasks():
+        manager.add_task("Review SOLID Principles", "2024-08-10", priority="high")
+        manager.add_task("Prepare for Final Exam", "2024-08-15", priority="medium")
+        manager.add_task("Do laundry", priority="low")
+
+    print("\n--- Current Tasks ---")
+    for t in manager.list_tasks():
+        print(t)
+    print("---------------------")
+
     manager.mark_task_completed(1)
-    manager.list_tasks()
 
-
-class Task:
-    def __init__(self, task_id, description, due_date=None, completed=False):
-        self.id = task_id
-        self.description = description
-        self.due_date = due_date
-        self.completed = completed
-
-    def mark_completed(self):
-        self.completed = True
-        print(f"Task {self.id} '{self.description}' marked as completed.")
-
-    def __str__(self):
-        status = "/" if self.completed else " "
-        due = f" (Due: {self.due_date})" if self.due_date else ""
-        return f"[{status}] {self.id}. {self.description}{due}"
-
-
-# --------------------------
-# TaskManager Class
-# --------------------------
-class TaskManager:
-    def __init__(self):
-        self.tasks = []
-        self.next_id = 1
-
-    def add_task(self, description, due_date=None):
-        task = Task(self.next_id, description, due_date)
-        self.tasks.append(task)
-        self.next_id += 1
-        print(f"Task '{description}' added.")
-        return task
-
-    def list_tasks(self):
-        print("\n--- Current Tasks ---")
-        if not self.tasks:
-            print("No tasks available.")
-            return
-        for task in self.tasks:
-            print(task)
-        print("---------------------")
-
-    def get_task_by_id(self, task_id):
-        for task in self.tasks:
-            if task.id == task_id:
-                return task
-        return None
-
-    def mark_task_completed(self, task_id):
-        task = self.get_task_by_id(task_id)
-        if task:
-            task.mark_completed()
-            return True
-        print(f"Task {task_id} not found.")
-        return False
-
-
-# --------------------------
-# Main Program Logic
-# --------------------------
-if __name__ == "__main__":
-    manager = TaskManager()
-    manager.add_task("Learn Git", "2024-08-01")
-    manager.add_task("Practice OOP", "2024-08-05")
-    manager.list_tasks()
-    manager.mark_task_completed(1)
-    manager.list_tasks()
-
-    # Note: Logic สำหรับ Save/Load ยังไม่ครอบคลุม
-    # สามารถเพิ่มได้โดยใช้หลักการ Single Responsibility Principle (SRP)
+    print("\n--- After Complete(1) ---")
+    for t in manager.list_tasks():
+        print(t)
+    print("-------------------------")
