@@ -1,0 +1,2 @@
+1,Review SOLID Principles,2024-08-10,True
+2,Prepare for Final Exam,2024-08-15,False
